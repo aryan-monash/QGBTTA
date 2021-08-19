@@ -2,10 +2,29 @@ library(tidyverse)
 library(tidytext)
 library(SnowballC)
 library(tm)
-library(spacyr)
+#library(spacyr)
 library(textstem)
+library(proustr)
+
 
 pm_speech_final <- read_csv("data/2018-09-24-morrison.csv")
+
+# Tokenization + basic stop word removal
+tidy_speech <- pm_speech_final %>%
+    #mutate(line = row_number()) %>%
+    pr_normalize_punc(document)  %>%
+    unnest_tokens(word, document, strip_numeric = TRUE) %>% 
+    anti_join(tidytext::stop_words) %>%
+    count(link, word, sort = TRUE)
+
+
+# Remove numbers
+nums <- tidy_speech %>%
+            filter(str_detect(word, "^[0-9]")) %>%
+            select(word) %>%
+            unique()
+tidy_speech <- tidy_speech  %>% 
+    anti_join(nums, by = "word")
 
 # Prime minister might be an important word,
 # maybe remove the most frequent words
@@ -26,36 +45,19 @@ tidy_speech <- pm_speech_final %>%
     mutate(stem = wordStem(word)) %>%
     count(link, word, stem, sort = TRUE)
 
-# Remove numbers
-nums <- tidy_speech %>% filter(str_detect(word, "^[0-9]")) %>% select(word) %>% unique()
-tidy_speech <- tidy_speech  %>% 
-    anti_join(nums, by = "word")
+
+filter_words <- tidy_speech %>%
+            group_by(link) %>%
+            slice_max(order_by = n, n = 3) %>%
+            arrange(desc(n)) %>%
+            filter(word %in% c("prime", "minister", "host"))
+
  
 write_csv(tidy_speech, "tidy_speech.csv")
 
 
 
- 
-filter(tidy_speech, link == "/media/interview-waleed-aly-project")
 
 # stemCompletion(tidy_speech$stem, tidy_speech$word)
-
-tidy_speech2 <- tidy_speech  %>% count(link, stem, sort = TRUE)
-
-
 pm_speech_final  %>% 
     mutate(word = spacy_parse(document, pos = FALSE, entity = FALSE))
-
-write_csv(tidy_speech_2, "tidy_speech_2.csv")
-
-
-test <- tidy_speech_2 %>% group_by(link) %>% slice_max(order_by = n, n = 3)  %>% arrange(desc(n))
-write_csv(test, "names.csv")
-
-
-speech <- read_csv("Data/all_pm_df.csv")
-saveRDS(speech, file="df.Rds")
-
-speech <- speech[-1]
-
-filter(speech, `Release Date` == "Morrison, Scott")

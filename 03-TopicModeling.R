@@ -21,3 +21,12 @@ top_terms <- speech_topics %>%
   ungroup() %>%
   arrange(topic, -beta)
 top_terms
+
+library(ggplot2)
+
+top_terms %>%
+  mutate(term = reorder_within(term, beta, topic)) %>%
+  ggplot(aes(beta, term, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  scale_y_reordered()
