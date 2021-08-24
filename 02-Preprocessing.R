@@ -17,6 +17,24 @@ tidy_speech <- pm_speech_final %>%
     anti_join(tidytext::stop_words) %>%
     count(link, word, sort = TRUE)
 
+# Custom stopwords
+filter_words <- tidy_speech %>%
+            group_by(link) %>%
+            slice_max(order_by = n, n = 3) %>%
+            arrange(desc(n)) %>%
+            filter(word %in% c("prime", "minister", "host"))
+
+# Filter custom stopwords
+tidy_speech <- tidy_speech %>% 
+            anti_join(filter_words)
+
+ 
+write_csv(tidy_speech, "tidy_speech.csv")
+
+
+
+
+
 
 # Remove numbers
 nums <- tidy_speech %>%
@@ -44,16 +62,6 @@ tidy_speech <- pm_speech_final %>%
     anti_join(stop_words) %>%
     mutate(stem = wordStem(word)) %>%
     count(link, word, stem, sort = TRUE)
-
-
-filter_words <- tidy_speech %>%
-            group_by(link) %>%
-            slice_max(order_by = n, n = 3) %>%
-            arrange(desc(n)) %>%
-            filter(word %in% c("prime", "minister", "host"))
-
- 
-write_csv(tidy_speech, "tidy_speech.csv")
 
 
 
