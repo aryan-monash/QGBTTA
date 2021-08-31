@@ -1,6 +1,7 @@
 library(tidyverse)
 library(tidytext)
 library(topicmodels)
+library(wordcloud)
 
 tidy_speech <- read_csv("tidy_speech.csv")
 
@@ -13,6 +14,15 @@ speech_lda <- LDA(speech_dtm, k = 10, control = list(seed = 1234))
 # Probability that the term was generated from that topic = beta
 speech_topics <- tidy(speech_lda, matrix = "beta")
 speech_topics
+
+word_freq <- speech_topics %>%
+      mutate(n = trunc(beta * 10000)) %>%
+      filter(topic == 6)
+
+wordcloud(words = word_freq$term,
+          freq = word_freq$n,
+          max.words = 50
+          )
 
 # Top terms of every topics
 top_terms <- speech_topics %>%
