@@ -1,0 +1,213 @@
+---
+title: "Debugging"
+author: "Aryan Jain"
+date: "13/09/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 01-Scrape.R
+
+## Alternate Scraping methods
+
+```{r}
+# Scrape using polite and rvest
+
+pmt_session = bow("https://pmtranscripts.pmc.gov.au/release/transcript-1")
+pmt_data = scrape(pmt_session)
+page = read_html(link)
+
+# Spoof it with common user agent
+
+ua <- user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Safari/605.1.15") # nolint
+seesion_with_ua <- html_session("https://pmtranscripts.pmc.gov.au/release/transcript-41750",ua) # nolint
+
+pmt_session_ua <- read_html("https://pmtranscripts.pmc.gov.au/release/transcript-41750", ua) # nolint
+pmt_session_ua <- read_html("https://pmtranscripts.pmc.gov.au/release/transcript-41750", # nolint
+                         user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Safari/605.1.15") # nolint
+```
+
+## Fixing inconsistensies in scraped files
+
+### Fix Release date & Title column
+
+```{r}
+# Fix title column
+for(i in seq_len(nrow(howard))) {
+  
+  howard[i,2] = read_html(pull(howard[i,6])) %>% 
+    html_elements(".field--name-field-long-title") %>% 
+    html_text()
+}
+
+# Fix Release Date column
+for(i in seq_len(nrow(howard))) {
+  
+  howard[i,1] = read_html(pull(howard[i,6])) %>% 
+    html_elements("#block-views-block-transcript-meta-block-tm .block .row:nth-child(1) .col-lg-8") %>% 
+    html_text()
+}
+
+# Merging Fixes with main file
+all_pm_speech1<-all_pm_speech[!(all_pm_speech$`Prime Minister`=="Howard, John"),]
+all_pm_speech1 <- all_pm_speech1 %>% mutate(ID = as.numeric(str_extract(ID, "[[:digit:]]+")))
+all_pm_speech_fn <- bind_rows(all_pm_speech1, howard)
+```
+
+### Fixing Encodings
+
+#### Fix HTML Source Encoding
+
+```{r}
+for (src in test_df$Source){
+  doc <- tryCatch({read_html(src) %>% html_nodes("p") %>% html_text()},
+                  error = function(e){
+                    cor_enc <- html_encoding_guess(src)$encoding[1]
+                    src_fixed <- repair_encoding(src, from = cor_enc)
+                    read_html(src_fixed) %>% html_nodes("p") %>% html_text()
+                  })
+  if(inherits(doc, "try-error"))
+  {
+    cor_enc <- html_encoding_guess(src)$encoding[1]
+    src_fixed <- repair_encoding(src, from = cor_enc)
+    doc <- read_html(src) %>% html_nodes("p") %>% html_text()
+  }
+  test_df$document[test_df$Source == src] <- paste(doc, collapse = "     ")
+```
+
+#### Fix Extracted Document encoding
+
+```{r}
+# Validate Encodings
+inv_enc <- all_pm_speech[!validUTF8(all_pm_speech$Document),]
+# Fix Encoding
+inv_enc$Document <- stringi::stri_encode(inv_enc$Document, "", "utf-8")
+# Merge fix with the main file
+all_pm_speech[all_pm_speech$ID %in% inv_enc$ID, 7] = inv_enc$Document
+
+```
+
+# 02-Preprocessing.R
+
+## Alternate Methods for preprocessing
+
+```{r}
+# Preprocessing for topicmodels library
+
+# Tokenization + basic stop word removal + stemming
+tidy_speech <- pm_speech_final %>%
+    #mutate(line = row_number()) %>%
+    pr_normalize_punc(document)  %>%
+    unnest_tokens(word, document, strip_numeric = TRUE) %>%
+    anti_join(tidytext::stop_words) %>%
+    mutate(word = wordStem(word)) %>%
+    count(link, word, sort = TRUE)
+
+# Custom stopwords - Method 1
+  filter_words <- tidy_speech %>%
+              group_by(link) %>%
+              slice_max(order_by = n, n = 3) %>%
+              arrange(desc(n)) %>%
+              filter(word %in% c("prime", "minister", "host"))
+  ## Filter custom stopwords
+  tidy_speech <- tidy_speech %>% 
+              anti_join(filter_words)
+  
+# Custom stopwords - Method 2
+  custom_stop_words <- tribble(
+      ~word, ~lexicon,
+      "prime", "CUSTOM",
+      "minister", "CUSTOM"
+  )
+  stop_words2 <- stop_words  %>%
+      bind_rows(custom_stop_words)
+
+# Remove numbers - Redundant!!
+nums <- tidy_speech %>%
+            filter(str_detect(word, "^[0-9]")) %>%
+            select(word) %>%
+            unique()
+tidy_speech <- tidy_speech  %>% 
+    anti_join(nums, by = "word")
+
+
+ 
+write_csv(tidy_speech, "tidy_speech.csv")
+```
+
+# 03-TopicModelling.R
+
+# Using STM
+
+```{r}
+library(stm)
+pm_speech_final <- pm_speech_final %>%
+    pr_normalize_punc(document)
+
+processed <- textProcessor(pm_speech_final$document,
+                           metadata = pm_speech_final,
+                           customstopwords = c("prime", "minister",
+                           "government", "will", "australia", "australian"))
+out <- prepDocuments(processed$documents, processed$vocab, processed$meta)
+
+docs <- out$documents
+vocab <- out$vocab
+meta <- out$meta
+ 
+model_stm <- stm(documents = out$documents, vocab = out$vocab,
+              K = 50, prevalence = ~s(date),
+              max.em.its = 300, data = out$meta,
+              init.type = "Spectral", verbose = TRUE)
+plot(model_stm)
+speech <- convertCorpus(processed$documents, processed$vocab, type = "Matrix")
+```
+
+# Using Tidytext + TopicModels
+
+```{r}
+
+# Reading tidytext cleaned and tokenised speech
+tidy_speech <- read_csv("tidy_speech.csv")
+
+# Creating Document-term-matrix
+speech_dtm <- tidy_speech %>%
+  cast_dtm(link, word, n)
+
+# Creating model
+speech_lda <- LDA(speech_dtm, k = 10, control = list(seed = 1234))
+
+# Probability that the term was generated from that topic = beta
+speech_topics <- tidy(speech_lda, matrix = "beta")
+speech_topics
+
+# Creating wordcloud
+word_freq <- speech_topics %>%
+      mutate(n = trunc(beta * 10000)) %>%
+      filter(topic == 6)
+
+wordcloud(words = word_freq$term,
+          freq = word_freq$n,
+          max.words = 50
+          )
+
+# Top terms of every topics
+top_terms <- speech_topics %>%
+  group_by(topic) %>%
+  slice_max(beta, n = 10) %>% 
+  ungroup() %>%
+  arrange(topic, -beta)
+top_terms
+
+# Visualising Top terms in topics
+library(ggplot2)
+top_terms %>%
+  mutate(term = reorder_within(term, beta, topic)) %>%
+  ggplot(aes(beta, term, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  scale_y_reordered()
+```
+
