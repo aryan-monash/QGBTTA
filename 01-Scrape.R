@@ -91,11 +91,7 @@ for (pm_id in pm_meta$id[1:17]) {
   for (i in seq_len(nrow(current_pm_df))) {
     # Initialize individual speech URL
     speech_url <- paste0(
-<<<<<<< HEAD
       "https://pmtranscripts.pmc.gov.au", # from link selector
-=======
-      "https://pmtranscripts.pmc.gov.au",
->>>>>>> 9007a0eef9221eb4d5cf8c5df85c427e6949a544
       current_pm_df[i, 5] # ID column
     )
     # Start Scraping
