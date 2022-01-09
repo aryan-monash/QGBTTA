@@ -7,6 +7,10 @@ library(RSelenium)
 
 # Creating Reference Metadata ---------------------------------------------
 
+# Dataframe with id, name, term_start, term_end and number of speeches as per website
+# id column is the ID assigned to each PM by the website.
+# Scott Morrison's id 500 was selected arbitarily.
+
 pm_meta <- data.frame(matrix(ncol = 5, nrow = 18))
 colnames(pm_meta) <- c("id", "name", "term_start", "term_end", "n_speech")
 pm_meta["id"] <- c(
@@ -50,38 +54,52 @@ pm_meta["n_speech"] <- c(
 
 # Starting RSelenium Client
 rD <- rsDriver(browser = "firefox")
+# Initializing client object
 remDr <- rD[["client"]]
 
 # Initializing main Dataframe
 all_pm_df <- data.frame()
 
 # Main scraping loop - Loop through Prime ministers
+# Select 1:17 to loop through the first 17 prime ministers in pm_meta.
 for (pm_id in pm_meta$id[1:17]) {
+  
+  # Initializing new home page link based on PM id
   pm_home_link <- paste0(
     "https://pmtranscripts.pmc.gov.au/?combine=&field_release_date_value[min]=&field_release_date_value[max]=&field_long_title_value=&body_value=&field_prime_minister_target_id=", # nolint
     id, "&items_per_page=All"
   )
+  # Navigating to PM homepage
   remDr$navigate(pm_home_link)
+  # Assigning new character HTML object from link
   pm_home_src <- remDr$getPageSource()[[1]]
 
+  # Extracting meta for each PM using PM homescreen
+  # Extracted table [rx4] contains data,title,PM_name, original_doc columns
   current_pm_df <- read_html(pm_home_src) %>% html_table()
   current_pm_df <- current_pm_df[[1]]
+  # Extracting links for all speeches of selected PM from HTML object
   pm_speech_links <- read_html(pm_home_src) %>%
     html_nodes("td.views-field-field-release-date a") %>%
     html_attr("href")
   current_pm_df["ID"] <- pm_speech_links #  ID column houses links for corresponding speech title # nolint
-  current_pm_df["Source"] <- as.character(NA) # Initialising column for individual speech urls # nolint
+  current_pm_df["Source"] <- as.character(NA) # Initialising column for HTML source of individual speeches # nolint
 
   # Sub loop - Loop through Documents
+  # Loop through individual PM table to extract HTML source from every document
   for (i in seq_len(nrow(current_pm_df))) {
+    # Initialize individual speech URL
     speech_url <- paste0(
       "https://pmtranscripts.pmc.gov.au",
-      current_pm_df[i, 5]
+      current_pm_df[i, 5] # ID column
     )
-    Sys.sleep(runif(1, 4.0, 7.5)) # Crawl Delay
+    # Start Scraping
+    Sys.sleep(runif(1, 4.0, 7.5)) # Crawl Delay as mentioned by the website
+    # Navigate to speech webpage
     remDr$navigate(speech_url)
+    # Get source
     pm_speech_src <- remDr$getPageSource()[[1]]
-    current_pm_df[i, 6] <- pm_speech_src
+    current_pm_df[i, 6] <- pm_speech_src # Populating 'Source' column
   }
   # Getting PM's meta for savefile name
   current_pm_meta <- pm_meta %>%
@@ -102,10 +120,13 @@ for (pm_id in pm_meta$id[1:17]) {
 
 # Function for extraction
 extract_text <- function(df) {
-  pb <- txtProgressBar(min = 0, max = 22741, initial = 0, style = 3)
-  df["Document"] <- as.character(NA)
+  pb <- txtProgressBar(min = 0, max = 22741, initial = 0, style = 3) # progress bar
+  # Intializing column for extracted text for individual speeches of each PM
+  df["Document"] <- as.character(NA) 
+  # Looping through all speeches
   for (src in df$Source) {
-    stepi <- stepi + 1
+    stepi <- stepi + 1 # increment step for progressbar
+    # error handler for broken encodings
     doc <- tryCatch({
         read_html(src) %>%
           html_nodes("p") %>%
@@ -114,7 +135,7 @@ extract_text <- function(df) {
       error = function(e) {
         # cor_enc <- html_encoding_guess(src)$encoding[1]
         # print(cor_enc)
-        src_fixed <- rvest::repair_encoding(src, from = "utf-8")
+        src_fixed <- rvest::repair_encoding(src, from = "utf-8") # enforcing utf-8 encoding
         read_html(src_fixed) %>%
           html_nodes("p") %>%
           html_text()
@@ -130,17 +151,18 @@ extract_text <- function(df) {
 # Calling the function
 all_pm_speech <- extract_text(all_pm_df)
 all_pm_speech <- all_pm_speech %>% 
-  select(-4,-6,-8) %>% 
+  select(-4,-6,-8) %>% # Keeping only required columns
   rename(date = `Release Date`,
          title = Title,
          pm = `Prime Minister`,
          id = ID,
          document = Document) %>%
-  mutate(date = as.Date(date, "%d/%m/%Y"),
-         id = as.character(str_extract(id, "[[:digit:]]+")))
+  mutate(date = as.Date(date, "%d/%m/%Y"), # Fixing date format
+         id = as.character(str_extract(id, "[[:digit:]]+"))) # Extract document ID from link
 
 # Validate Encodings
-inv_enc <- all_pm_speech[!validUTF8(all_pm_speech$Document),]
+# Even after implement a checker to validate encoding while scraping, this is still needed.
+inv_enc <- all_pm_speech[!validUTF8(all_pm_speech$Document),] 
 # Fix Encoding
 inv_enc$Document <- stringi::stri_encode(inv_enc$Document, "", "utf-8")
 # Merge fix with the main file
