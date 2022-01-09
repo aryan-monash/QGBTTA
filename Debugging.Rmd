@@ -13,6 +13,8 @@ knitr::opts_chunk$set(echo = TRUE)
 
 ## Alternate Scraping methods
 
+As the website was using a protection service against scrape bots, traditional scraping methods didn't work.
+
 ```{r}
 # Scrape using polite and rvest
 
@@ -26,6 +28,7 @@ ua <- user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/60
 seesion_with_ua <- html_session("https://pmtranscripts.pmc.gov.au/release/transcript-41750",ua) # nolint
 
 pmt_session_ua <- read_html("https://pmtranscripts.pmc.gov.au/release/transcript-41750", ua) # nolint
+
 pmt_session_ua <- read_html("https://pmtranscripts.pmc.gov.au/release/transcript-41750", # nolint
                          user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Safari/605.1.15") # nolint
 ```
@@ -75,7 +78,7 @@ for (src in test_df$Source){
     src_fixed <- repair_encoding(src, from = cor_enc)
     doc <- read_html(src) %>% html_nodes("p") %>% html_text()
   }
-  test_df$document[test_df$Source == src] <- paste(doc, collapse = "     ")
+  test_df$document[test_df$Source == src] <- paste(doc, collapse = "     ")}
 ```
 
 #### Fix Extracted Document encoding
@@ -95,15 +98,16 @@ all_pm_speech[all_pm_speech$ID %in% inv_enc$ID, 7] = inv_enc$Document
 ## Alternate Methods for preprocessing
 
 ```{r}
+library(tidytext)
 # Preprocessing for topicmodels library
 
 # Tokenization + basic stop word removal + stemming
 tidy_speech <- pm_speech_final %>%
     #mutate(line = row_number()) %>%
-    pr_normalize_punc(document)  %>%
+    #pr_normalize_punc(document)  %>%
     unnest_tokens(word, document, strip_numeric = TRUE) %>%
-    anti_join(tidytext::stop_words) %>%
-    mutate(word = wordStem(word)) %>%
+    anti_join(stopwords) %>%
+    mutate(word = textstem::lemmatize_words(word)) %>%
     count(link, word, sort = TRUE)
 
 # Custom stopwords - Method 1
@@ -147,7 +151,7 @@ library(stm)
 pm_speech_final <- pm_speech_final %>%
     pr_normalize_punc(document)
 
-processed <- textProcessor(pm_speech_final$document,
+processed <- textProcessor(documents = pm_speech_final$document,
                            metadata = pm_speech_final,
                            customstopwords = c("prime", "minister",
                            "government", "will", "australia", "australian"))
@@ -163,6 +167,32 @@ model_stm <- stm(documents = out$documents, vocab = out$vocab,
               init.type = "Spectral", verbose = TRUE)
 plot(model_stm)
 speech <- convertCorpus(processed$documents, processed$vocab, type = "Matrix")
+```
+
+
+```{r}
+library(stm)
+pm_speech_final <- pm_speech_final %>%
+    pr_normalize_punc(document)
+
+processed <- textProcessor(documents = pm_speech_final$document,
+                           metadata = pm_speech_final,
+                           onlycharacter = TRUE,
+                           customstopwords = c("prime", "minister", "government", "will", "australia", "australian","state", "government", "pm", "member", "committee", "commission", "house", "journalist", stopwords::data_stopwords_stopwordsiso$en))
+out <- prepDocuments(processed$documents, processed$vocab, processed$meta)
+
+docs <- out$documents
+vocab <- out$vocab
+meta <- out$meta
+
+optimal_k <- searchK(documents = out$documents, vocab = out$vocab,
+              K = c(100,150,200), cores = 4)
+ 
+model_stm <- stm(documents = out$documents, vocab = out$vocab,
+              K = 50, prevalence = ~s(date) + pm,
+              max.em.its = 300, data = out$meta,
+              init.type = "Spectral", verbose = TRUE)
+plot(model_stm)
 ```
 
 # Using Tidytext + TopicModels
@@ -209,5 +239,1073 @@ top_terms %>%
   geom_col(show.legend = FALSE) +
   facet_wrap(~ topic, scales = "free") +
   scale_y_reordered()
+```
+
+# Using text2vec
+
+```{r, eval = TRUE}
+library(text2vec)
+
+prep_fun = function(x) {
+  # make text lower case
+  x = str_to_lower(x)
+  # lemmatization
+  x = textstem::lemmatize_words(x)
+  # remove non-alphanumeric symbols
+  x = str_replace_all(x, "[^[:alpha:]]", " ")
+  # collapse multiple spaces
+  x = str_replace_all(x, "\\s+", " ")
+}
+
+custom_stop_words <- tribble(
+    ~word, ~lexicon,
+    "prime", "CUSTOM",
+    "minister", "CUSTOM",
+    "australia", "CUSTOM",
+    "australian", "CUSTOM",
+    "state", "CUSTOM",
+    "government", "CUSTOM",
+    "prime", "CUSTOM",
+    "pm", "CUSTOM",
+    "member", "CUSTOM",
+    "committee", "CUSTOM",
+    "commission", "CUSTOM",
+    "house", "CUSTOM",
+    "journalist", "CUSTOM"
+)
+
+
+stopwords <- sort(c(stopwords::stopwords(source = "stopwords-iso"),custom_stop_words$word))
+
+
+stem_tokenizer = function(x) {
+  word_tokenizer(x) %>% lapply( function(x) textstem::lemmatize_words(x))
+ }
+
+it_train = itoken(pm_speech_final$document, 
+             preprocessor = prep_fun, 
+             tokenizer = stem_tokenizer, 
+             ids = pm_speech_final$id, 
+             progressbar = TRUE)
+vocab = create_vocabulary(it_train, stopwords = stopwords) %>% 
+    prune_vocabulary(term_count_min = 10, doc_proportion_max = 0.2)
+
+# tokens = tolower(pm_speech_final$document)
+# tokens = word_tokenizer(tokens)
+# it = itoken(tokens, ids = pm_speech_final$id, progressbar = TRUE)
+# v = create_vocabulary(it)
+# v = prune_vocabulary(v, term_count_min = 10, doc_proportion_max = 0.2)
+  
+vectorizer = vocab_vectorizer(vocab)
+dtm = create_dtm(it_train, vectorizer, type = "dgTMatrix")
+
+lda_model = LDA$new(n_topics = 110, doc_topic_prior = 0.1, topic_word_prior = 0.01)
+doc_topic_distr =
+lda_model$fit_transform(x = dtm, n_iter = 200,
+                        convergence_tol = 0.001, n_check_convergence = 25,
+                        progressbar = TRUE)
+
+lda_model$plot(out.dir = "ldavis_110", open.browser = FALSE)
+
+# labels <- LabelTopics(assignments = doc_topic_distr > 0.05,
+#                             dtm = speech_dfm,
+#                             M = 1)
+lda_model_160 = LDA$new(n_topics = 160, doc_topic_prior = 0.1, topic_word_prior = 0.01)
+doc_topic_distr =
+lda_model_160$fit_transform(x = dtm, n_iter = 200,
+                        convergence_tol = 0.001, n_check_convergence = 25,
+                        progressbar = TRUE)
+
+lda_model_160$plot(out.dir = "ldavis_160", open.browser = FALSE)
+
+lda_model_190 = LDA$new(n_topics = 190, doc_topic_prior = 0.1, topic_word_prior = 0.01)
+doc_topic_distr =
+lda_model_190$fit_transform(x = speech_dfm, n_iter = 200,
+                        convergence_tol = 0.001, n_check_convergence = 25,
+                        progressbar = TRUE)
+lda_model_190$plot(out.dir = "ldavis_190", open.browser = FALSE)
+
+lda_model$plot()
+
+#install.packages("textmineR", "text2vec", "proustr")
+```
+
+Also we can get top words for each topic. They can be sorted by probability of the chance to observe word in a given topic (`lambda = 1`):
+```{r}
+lda_model$get_top_words(n = 5, topic_number = 1L:20, lambda = 1)
+```
+
+Also top-words could be sorted by "relevance" which also takes into account frequency of word in the corpus (`0 < lambda < 1`). From my experience in most cases setting `0.2 < lambda < 0.4` works best. See [LDAvis: A method for visualizing and interpreting topics](http://nlp.stanford.edu/events/illvi2014/papers/sievert-illvi2014.pdf) paper for details.
+
+```{r}
+as.data.frame(lda_model$get_top_words(n = 10, topic_number = c(1L, 2L, 3L, 4L,5L,6L,7L,8L,9L,10L), lambda = 0.2))
+```
+
+Now `doc_topic_distr` matrix represents distribution of topics in documents. Each row is document and values are proportions of corresponding topics.
+
+For example topic distribution for first document:
+
+```{r}
+barplot(doc_topic_distr[1, ], xlab = "topic", 
+        ylab = "proportion", ylim = c(0, 1), 
+        names.arg = 1:ncol(doc_topic_distr))
+```
+
+
+```{r}
+# number of topics vector
+n_topics <- seq(50, 100, by = 15)
+
+it_train = itoken(pmf_train$document, 
+             preprocessor = prep_fun, 
+             tokenizer = stem_tokenizer, 
+             ids = pmf_train$id, 
+             progressbar = TRUE)
+vocab = create_vocabulary(it_train, stopwords = stopwords) %>% 
+    prune_vocabulary(term_count_min = 10, doc_proportion_max = 0.2)
+ 
+vectorizer = vocab_vectorizer(vocab)
+dtm = create_dtm(it_train, vectorizer, type = "dgTMatrix")
+# lda_model = LDA$new(n_topics = 20, doc_topic_prior = 0.1, topic_word_prior = 0.05)
+# doc_topic_distr = 
+#   lda_model$fit_transform(x = dtm, n_iter = 200, 
+#                           convergence_tol = 0.001, n_check_convergence = 25, 
+#                           progressbar = TRUE)
+
+
+
+# assign model data from R6 class (environment) to variable
+models_data <- lapply(fitted_models,
+                      function(fitted_models) 
+                       fitted_models$get_fitted_LDA_model())
+
+
+
+it_test = itoken(pmf_test$document, 
+             preprocessor = prep_fun, 
+             tokenizer = stem_tokenizer, 
+             ids = pmf_test$id, 
+             progressbar = TRUE)
+vocab_test = create_vocabulary(it_test, stopwords = stopwords) %>% 
+    prune_vocabulary(term_count_min = 10, doc_proportion_max = 0.2)
+ 
+vectorizer_test = vocab_vectorizer(vocab_test)
+new_dtm = create_dtm(it_test, vectorizer_test, type = "dgTMatrix")
+
+
+
+tokens = tolower(movie_review$review[1:4000])
+tokens = word_tokenizer(tokens)
+it = itoken(tokens, ids = movie_review$id[1:4000], progressbar = FALSE)
+v = create_vocabulary(it)
+v = prune_vocabulary(v, term_count_min = 10, doc_proportion_max = 0.2)
+  
+
+it = itoken(pmf_test$document, prep_fun, stem_tokenizer, ids = pmf_test$id)
+new_dtm =  create_dtm(it, vectorizer, type = "dgTMatrix")
+new_doc_topic_distr = lda_model$transform(new_dtm)
+
+
+perplexity(new_dtm, topic_word_distribution = lda_model$topic_word_distribution, doc_topic_distribution = lda_model$transform(new_dtm))
+
+```
+
+
+# Find K
+
+```{r}
+splitfolds <- sample(1:5, quanteda::ndoc(speech_dfm), replace = TRUE)
+  
+in_data <- speech_dfm[splitfolds != 1, ]
+out_data <- speech_dfm[splitfolds == 1, ]
+
+    
+n_topics <- seq(80, 250, by = 50)
+
+fitted_models <- lapply(n_topics, function(n_topics) 
+  LDA$new(n_topics = n_topics, 
+          doc_topic_prior = 1, 
+          topic_word_prior = 1), mc.cores = detectCores())
+
+# fit LDA models to input dtm
+doc_topic_distr <- mclapply(fitted_models, function(fitted_models)
+  fitted_models$fit_transform(in_data, 
+                              n_iter = 500, 
+                              convergence_tol = 0.001,
+                              check_convergence_every_n = 25), mc.cores = detectCores())  
+
+perp <- lapply(fitted_models, function(fitted_models)
+  perplexity(out_data,
+             topic_word_distribution = fitted_models$topic_word_distribution,
+             doc_topic_distribution = fitted_models$transform(out_data)), mc.cores = detectCores())  
+
+
+# check plot of mean log-likelihood
+mean_perp <- lapply(perp, function(x) mean(x, na.rm = TRUE), mc.cores = detectCores())
+
+plot(cbind(n_topics, unlist(mean_perp)), xlab = "# topics", 
+     ylab = "mean log-likelihood")
+```
+
+# Find alpha and beta
+
+```{r}
+alpha = c(0.05,0.1,0.5,1,5,10)
+eta = c(0.05,0.1,0.5,1,5,10)
+
+fitted_models <- mapply(function(alpha,eta) 
+  LDA$new(n_topics = n_topics, 
+          doc_topic_prior = alpha, 
+          topic_word_prior = eta), alpha, eta)
+
+# fit LDA models to input dtm
+doc_topic_distr <- lapply(fitted_models, function(fitted_models)
+  fitted_models$fit_transform(dtm, 
+                              n_iter = 200, 
+                              convergence_tol = 0.001,
+                              check_convergence_every_n = 25))  
+
+perp <- lapply(fitted_models, function(fitted_models)
+  perplexity(new_dtm,
+             topic_word_distribution = fitted_models$topic_word_distribution,
+             doc_topic_distribution = fitted_models$transform(new_dtm)))  
+
+
+# check plot of mean log-likelihood
+mean_perp <- lapply(perp, function(x) mean(x, na.rm = TRUE))
+
+plot(cbind(n_topics, unlist(mean_perp)), xlab = "# topics", 
+     ylab = "mean log-likelihood")
+```
+
+```{r}
+library(text2vec)
+library(tidytext)
+library(quanteda)
+library(parallel)
+library(tidyverse)
+
+tidy(dtm) %>%
+  rename(id = row, word = column, count = value) %>% 
+  anti_join(stop_words2) -> tidy_speech
+
+library(hunspell)
+
+hunspell_check(c("australias", "Australia"), c("en_GB", "en_US"))
+
+tidy_speech %>% 
+  filter(hunspell_check(word)) -> tidy_speech_sc
+
+tidy_speech_sc %>%
+  mutate(word = textstem::lemmatize_words(word)) %>%
+  anti_join(stop_words2) -> tidy_speech_lem
+
+
+stop_words2 <- get_stopwords(source = "stopwords-iso")  %>%
+      bind_rows(custom_stop_words) 
+
+spacy_filter %>% 
+  mutate(lexicon = "PERSONS") %>% 
+  rename("word" = "token") -> space_filter
+
+tidy_speech <- pm_speech_final %>%
+    #mutate(line = row_number()) %>%
+    #proustr::pr_normalize_punc(document)  %>%
+    unnest_tokens(word, document, strip_numeric = TRUE, strip_punct = TRUE) %>%
+    anti_join(stop_words2) %>%
+    anti_join(spacy_filter[,c("word", "lexicon" )]) %>% 
+    mutate(word = textstem::lemmatize_words(word)) %>%
+    count(id, word, sort = TRUE)
+
+tidy_speech %>% 
+  filter(nchar(word) > 2) -> tidy_speech
+
+parsed_nostop %>% 
+  distinct(token, .keep_all = TRUE) %>% 
+  mutate(lemma = textstem::lemmatize_words(token)) %>% 
+  distinct(lemma, .keep_all = TRUE) %>%
+  filter(pos == "ADJ",
+         str_detect(lemma, "^[:alpha:].*[:alpha:]$"),
+         !lemma %in% tidytext::stop_words$word) %>%
+  count(lemma) %>% 
+  mutate(lemma = fct_reorder(str_to_title(lemma), n)) %>%
+  top_n(15)
+
+
+# Creating Document-term-matrix
+speech_dfm <- tidy_speech %>%
+  cast_dfm(id, word, n)
+
+speech_dtm <- tidy_speech %>% 
+  cast_dtm(id, word, n)
+
+assignments <- t(apply(doc_topic_distr, 1, function(x){
+  x[ x < 0.05 ] <- 0
+  x / sum(x)
+}))
+assignments[is.na(assignments)] <- 0
+
+labels <- textmineR::LabelTopics(assignments, speech_dtm)
+
+full_data <- speech_dfm
+
+spacy_filter %>% distinct(lemma)
+```
+
+
+```{r}
+fit_lda_model <- function(numtopics, dataset) {
+  lda_model <- LDA$new(n_topics = numtopics,
+                       doc_topic_prior = 0.1, #0.1
+                       topic_word_prior = 0.01) #0.01
+  lda_model_fit <- lda_model$fit_transform(dataset,
+                                           n_iter = 2000, #2000
+                                           convergence_tol = 0.001,
+                                           n_check_convergence = 25)
+  lda_model
+}
+
+validate_top <- function(numtopics,
+                         in_data,
+                         out_data){
+  
+  fitted_lda <- fit_lda_model(numtopics = numtopics, dataset = in_data)
+  
+  perpl <- perplexity(out_data, 
+                      topic_word_distribution = fitted_lda$topic_word_distribution, 
+                      doc_topic_distribution = fitted_lda$transform(out_data))
+  perpl
+}
+
+
+compute_models <- function(topics, numfolds, trainingdata){
+  
+  splitfolds <- sample(1:numfolds, quanteda::ndoc(trainingdata), replace = TRUE)
+  
+  perplexities <- matrix(nrow = numfolds, ncol = length(topics))
+  
+  for (i in 1:numfolds) {
+    in_data <- trainingdata[splitfolds != i, ]
+    out_data <- trainingdata[splitfolds == i, ]
+    
+    perplexities[i,] <- unlist(mclapply(topics, 
+                                        validate_top, 
+                                        in_data, 
+                                        out_data,
+                                        mc.cores = 7L))
+  }
+  
+  final_models <- mclapply(topics, 
+                           fit_lda_model, 
+                           dataset = trainingdata, 
+                           mc.cores = 7L)
+  
+  list(perplexities, final_models)
+}
+
+ntop <- seq(100, 200, by = 10) # (100, 125, 150, 175, 200)
+
+fm_12grams_measures2 <- compute_models(ntop, numfolds = 5, trainingdata =  speech_dfm)
+
+ntop2 <- seq(200, 300, by = 10) # (100, 125, 150, 175, 200)
+
+fm_12grams_measures3 <- compute_models(ntop2, numfolds = 2, trainingdata =  speech_dfm)
+
+ntop3 <- seq(300, 350, by = 10) # (100, 125, 150, 175, 200)
+
+fm_12grams_measures4 <- compute_models(ntop3, numfolds = 2, trainingdata =  speech_dfm)
+
+c(colMeans(fm_12grams_measures2[[1]]),colMeans(fm_12grams_measures3[[1]]), colMeans(fm_12grams_measures4[[1]])) %>% plot(type = "b")
+ %>% plot(type = "b")
+
+
+#stm::searchK()
+```
+
+
+```{r}
+
+coherance_sc <- data.frame(ntop)
+#coherance_sc[1] <- ntop 
+coherance_sc[,2] <- colMeans(fm_12grams_measures2[[1]])
+for(i in 1:11) {
+  tw = fm_12grams_measures2[[2]][[i]]$get_top_words(n = 10, lambda = 1)
+  res = coherence(tw, tcm, n_doc_tcm = 23772)
+  #colMeans(res)[[1]] -> c_v
+  coherance_sc[i,3] = colMeans(res)[[1]]
+  coherance_sc[i,4] = colMeans(res)[[2]]
+  coherance_sc[i,5] = colMeans(res)[[3]]
+  coherance_sc[i,6] = colMeans(res)[[4]]
+  coherance_sc[i,7] = colMeans(res)[[5]]
+  coherance_sc[i,8] = colMeans(res)[[6]]
+}
+tw = fm_12grams_measures2[[2]][[1]]$get_top_words(n = 10, lambda = 1)
+
+# for demonstration purposes create intrinsic TCM from original documents
+# scores might not make sense for metrics that are designed for extrinsic TCM
+#tcm = crossprod(sign(dtm))
+
+# check coherence
+# logger = lgr::get_logger('text2vec')
+# logger$set_threshold('debug')
+res = coherence(tw, tcm, n_doc_tcm = 23772)
+colMeans(res)[[6]]
+
+coherance_sc %>% 
+  #mutate(V2 = ((V2 - min(V2)) / (max(V2) - min(V2)))) %>% 
+  scale() %>% as.data.frame() -> csc 
+csc %>% 
+  ggplot(aes(x = ntop)) +
+  # geom_point(aes(y=V2), shape=18) +
+  # geom_line(aes(y=V2)) +
+  geom_point(aes(y=V2, color = "mean_logratio")) +
+  geom_line(aes(y=V2, color = "mean_logratio")) +
+  geom_point(aes(y=V3, color = "mean_pmi")) +
+  geom_line(aes(y=V3, color = "mean_pmi")) +
+  geom_point(aes(y=V4, color = "mean_npmi")) +
+  geom_line(aes(y=V4, color = "mean_npmi")) +
+  geom_point(aes(y=V5, color = "mean_difference")) +
+  geom_line(aes(y=V5, color = "mean_difference")) +
+  geom_point(aes(y=V6, color = "mean_npmi_cosim")) +
+  geom_line(aes(y=V6, color = "mean_npmi_cosim")) +
+  geom_point(aes(y=V7, color = "mean_npmi_cosim2")) +
+  geom_line(aes(y=V7, color = "mean_npmi_cosim2")) +
+  scale_x_continuous(breaks = seq(from = 100, to = 200, by = 10))+
+  labs(y="Scaled Coherence", x = "Topic Number (k)")
+```
+
+
+```{r}
+ldamodels20_350 <- c(fm_12grams_measures2[[1]],fm_12grams_measures3[[1]], fm_12grams_measures4[[1]])
+ntop_new <- seq(20, 350, by = 10)
+
+model_sel <- fm_12grams_measures2
+
+#coherance_sc_new <- data.frame(matrix(ncol=3))
+coherance_sc_new <- data.frame(ntop)
+coherance_sc_new[,2] <- colMeans(fm_12grams_measures2[[1]])
+for(i in 1:19) {
+  tw = fm_12grams_measures2[[2]][[i]]$get_top_words(n = 10, lambda = 1)
+  res = coherence(tw, tcm, n_doc_tcm = 23772)
+  colMeans(res)[[5]] -> c_v
+  coherance_sc_new[i,2] = c_v
+}
+tw = fm_12grams_measures2[[2]][[1]]$get_top_words(n = 10, lambda = 1)
+
+# for demonstration purposes create intrinsic TCM from original documents
+# scores might not make sense for metrics that are designed for extrinsic TCM
+#tcm = crossprod(sign(dtm))
+
+# check coherence
+# logger = lgr::get_logger('text2vec')
+# logger$set_threshold('debug')
+res = coherence(tw, tcm, n_doc_tcm = 23772)
+colMeans(res)[[6]]
+
+coherance_sc_new %>% 
+  ggplot(aes(x = ntop,y=V2)) +
+  geom_point() +
+  geom_line()
+```
+
+```{r}
+model_sel <- fm_12grams_measures3
+
+#coherance_sc_new <- data.frame(matrix(ncol=3))
+coherance_sc_new2 <- data.frame(ntop2)
+coherance_sc_new2[,2] <- colMeans(fm_12grams_measures3[[1]])
+for(i in 1:11) {
+  tw = fm_12grams_measures3[[2]][[i]]$get_top_words(n = 10, lambda = 1)
+  res = coherence(tw, tcm, n_doc_tcm = 23772)
+  colMeans(res)[[5]] -> c_v
+  coherance_sc_new2[i,2] = c_v
+}
+
+rbind(coherance_sc_new, coherance_sc_new2) %>%
+  ggplot(aes(x = ntop,y=V2)) +
+  geom_point() +
+  geom_line()
+```
+
+```{r}
+Arun2010 <- function(models, dtm) {
+  # length of documents (count of words)
+  len <- slam::row_sums(dtm)
+  # evaluate metrics
+  metrics <- sapply(models, FUN = function(model) {
+    # matrix M1 topic-word
+    m1 <- exp(model@beta) # rowSums(m1) == 1
+    m1.svd <- svd(m1)
+    cm1 <- as.matrix(m1.svd$d)
+    # matrix M2 document-topic
+    m2   <- model@gamma   # rowSums(m2) == 1
+    cm2  <- len %*% m2    # crossprod(len, m2)
+    norm <- norm(as.matrix(len), type="m")
+    cm2  <- as.vector(cm2 / norm)
+    # symmetric Kullback-Leibler divergence
+    divergence <- sum(cm1*log(cm1/cm2)) + sum(cm2*log(cm2/cm1))
+    return ( divergence )
+  })
+  return(metrics)
+}
+```
+
+```{r}
+tidy(speech_dfm) %>% cast_sparse(document,term,count) -> dtm
+```
+
+```{r}
+library(stm)
+set.seed(831)
+stm.search <- searchK(documents = out$documents,
+                      vocab = vocab,
+                      K = 100:250,
+                      init.type = "Spectral",
+                      prevalence = ~ Rating + Age + Positive.Feedback.Count + Recommended.IND,
+                      data = out$meta,
+                      cores = detectCores())
+plot(stm.search)
+```
+
+
+```{r}
+library(topicmodels)
+library(doParallel)
+library(ggplot2)
+library(scales)
+data("AssociatedPress", package = "topicmodels")
+burnin = 1000
+iter = 1000
+keep = 50
+alpha
+# define our "full data" - during development I pretend the full dataset is 
+# just the first 500 AP articles, which is enough for a reasonable test while not taking
+# forever to run.  When I ran the final model, I came back and removed the "1:500" from below
+full_data  <- speech_dtm
+n <- nrow(full_data)
+```
+
+
+```{r}
+#----------------5-fold cross-validation, different numbers of topics----------------
+# set up a cluster for parallel processing
+cluster <- makeCluster(detectCores(logical = TRUE) - 1) # leave one CPU spare...
+registerDoParallel(cluster)
+
+# load up the needed R package on all the parallel sessions
+clusterEvalQ(cluster, {
+   library(text2vec)
+})
+
+folds <- 5
+splitfolds <- sample(1:folds, n, replace = TRUE)
+candidate_k <- c(200, 250, 300) # candidates for how many topics
+
+# export all the needed R objects to the parallel sessions
+clusterExport(cluster, c("full_data", "burnin", "iter", "keep", "splitfolds", "folds", "candidate_k"))
+
+# we parallelize by the different number of topics.  A processor is allocated a value
+# of k, and does the cross-validation serially.  This is because it is assumed there
+# are more candidate values of k than there are cross-validation folds, hence it
+# will be more efficient to parallelise
+system.time({
+results <- foreach(j = 1:length(candidate_k), .combine = rbind) %dopar%{
+   k <- candidate_k[j]
+   results_1k <- matrix(0, nrow = folds, ncol = 2)
+   colnames(results_1k) <- c("k", "perplexity")
+   for(i in 1:folds){
+      train_set <- full_data[splitfolds != i , ]
+      valid_set <- full_data[splitfolds == i, ]
+      # print(nrow(train_set))
+      # 
+      # fitted_model <- LDA$new(n_topics = k, 
+      #     doc_topic_prior = 1, 
+      #     topic_word_prior = 1)
+      # 
+      # # fit LDA models to input dtm
+      # doc_topic_distr <- fitted_model$fit_transform(train_set, 
+      #                               n_iter = 300, 
+      #                               convergence_tol = 0.001,
+      #                               check_convergence_every_n = 25)
+      # 
+      # new_doc_topic_distr = fitted_model$transform(new_dtm)
+      # 
+      # perp <- text2vec::perplexity(valid_set,
+      #              topic_word_distribution = fitted_model$topic_word_distribution,
+      #              doc_topic_distribution = new_doc_topic_distr) 
+      
+
+      fitted <- LDA(train_set, k = k, method = "Gibbs",
+                    control = list(burnin = burnin, iter = iter, keep = keep) )
+      # results_1k[i,] <- c(k, perp)
+      results_1k[i,] <- c(k, perplexity(fitted, newdata = valid_set))
+   }
+   return(results_1k)
+}
+})
+stopCluster(cluster)
+
+results_df <- as.data.frame(results)
+
+ggplot(results_df, aes(x = k, y = perplexity)) +
+   geom_point() +
+   geom_smooth(se = FALSE) +
+   ggtitle("5-fold cross-validation of topic modelling with the 'Associated Press' dataset",
+           "(ie five different models fit for each candidate number of topics)") +
+   labs(x = "Candidate number of topics", y = "Perplexity when fitting the trained model to the hold-out set")
+```
+
+
+```{r}
+data("AssociatedPress", package = "topicmodels")
+full_data  <- AssociatedPress
+n <- nrow(full_data)
+```
+
+
+```{r}
+#Randomly sample training records
+training_ids = sample(1:5000,3500)
+testing_ids = setdiff(1:5000,training_ids)
+#Creating  subsets.
+training = movie_review[training_ids,]
+testing = movie_review[testing_ids,]
+
+
+```
+
+```{r}
+library(rsample)
+
+set.seed(31418600)
+pmf_split <- initial_split(pm_speech_final, 9/10)
+pmf_train <- analysis(pmf_split)
+pmf_test <- assessment(pmf_split)
+```
+
+
+```{r}
+install.packages("quanteda", "text2vec", )
+fit_lda_model <- function(numtopics, dataset) {
+  lda_model <- LDA$new(n_topics = numtopics,
+                       doc_topic_prior = 0.1,
+                       topic_word_prior = 0.01)
+  lda_model_fit <- lda_model$fit_transform(dataset,
+                                           n_iter = 2000,
+                                           convergence_tol = 0.001,
+                                           n_check_convergence = 25)
+  lda_model
+}
+
+validate_top <- function(numtopics,
+                         in_data,
+                         out_data){
+  
+  fitted_lda <- fit_lda_model(numtopics = numtopics, dataset = in_data)
+  
+  perpl <- perplexity(out_data, 
+                      topic_word_distribution = fitted_lda$topic_word_distribution, 
+                      doc_topic_distribution = fitted_lda$transform(out_data))
+  perpl
+}
+
+
+compute_models <- function(topics, numfolds = 5, trainingdata){
+  
+  splitfolds <- sample(1:numfolds, ndoc(trainingdata), replace = TRUE)
+  
+  perplexities <- matrix(nrow = numfolds, ncol = length(topics))
+  
+  for (i in 1:numfolds) {
+    in_data <- trainingdata[splitfolds != i, ]
+    out_data <- trainingdata[splitfolds == i, ]
+    
+    perplexities[i,] <- unlist(mclapply(topics, 
+                                        validate_top, 
+                                        in_data, 
+                                        out_data,
+                                        mc.cores = 1L))
+  }
+  
+  final_models <- mclapply(topics, 
+                           fit_lda_model, 
+                           dataset = trainingdata, 
+                           mc.cores = detectCores())
+  
+  list(perplexities, final_models)
+}
+
+ntop <- seq(100, 200, by = 25)
+
+fm_12grams_measures <- compute_models(ntop, numfolds = 5, trainingdata =  speech_dfm)
+```
+
+```{r}
+#----------------5-fold cross-validation, different numbers of topics----------------
+cluster <- makeCluster(detectCores(logical = TRUE) - 1) # leave one CPU spare...
+registerDoParallel(cluster)
+clusterEvalQ(cluster, {
+   library(text2vec)
+})
+folds <- 5
+#splitfolds <- sample(1:folds, n, replace = TRUE)
+splitfolds <- sample(1:folds, ndoc(full_data), replace = TRUE)
+
+candidate_k <- c(200, 250, 300) # candidates for how many topics
+clusterExport(cluster, c("full_data", "splitfolds", "folds", "candidate_k"))
+# we parallelize by the different number of topics.  A processor is allocated a value
+# of k, and does the cross-validation serially.  This is because it is assumed there
+# are more candidate values of k than there are cross-validation folds, hence it
+# will be more efficient to parallelise
+system.time({
+results <- foreach(j = 1:length(candidate_k), .combine = rbind) %dopar%{
+   k <- candidate_k[j]
+   results_1k <- matrix(0, nrow = folds, ncol = 2)
+   colnames(results_1k) <- c("k", "perplexity")
+   for(i in 1:folds){
+      train_set <- full_data[splitfolds != i , ]
+      valid_set <- full_data[splitfolds == i, ]
+      
+      fitted_model = LDA$new(n_topics = k, 
+          doc_topic_prior = 1,
+          topic_word_prior = 1)
+
+      # fit LDA models to input dtm
+      doc_topic_distr <- fitted_model$fit_transform(train_set,
+                                    n_iter = 300,
+                                    convergence_tol = 0.001,
+                                    check_convergence_every_n = 25)
+
+      new_doc_topic_distr = fitted_model$transform(valid_set)
+
+      perp <- text2vec::perplexity(valid_set,
+                   topic_word_distribution = fitted_model$topic_word_distribution,
+                   doc_topic_distribution = new_doc_topic_distr)
+      
+      results_1k[i,] <- c(k, perp)
+# 
+#       fitted <- LDA(train_set, k = k, method = "Gibbs",
+#                     control = list(burnin = burnin, iter = iter, keep = keep) )
+#       results_1k[i,] <- c(k, perplexity(fitted, newdata = valid_set))
+   }
+   return(results_1k)
+}
+})
+stopCluster(cluster)
+results_df <- as.data.frame(results)
+ggplot(results_df, aes(x = k, y = perplexity)) +
+   geom_point() +
+   geom_smooth(se = FALSE) +
+   ggtitle("5-fold cross-validation of topic modelling with the 'Associated Press' dataset",
+           "(ie five different models fit for each candidate number of topics)") +
+   labs(x = "Candidate number of topics", y = "Perplexity when fitting the trained model to the hold-out set")
+
+```
+
+
+```{r}
+custom_stop_words <- tribble(
+    ~word, ~lexicon,
+    "prime", "CUSTOM",
+    "minister", "CUSTOM",
+    "australia", "CUSTOM",
+    "australian", "CUSTOM",
+    "state", "CUSTOM",
+    "government", "CUSTOM",
+    "prime", "CUSTOM",
+    "pm", "CUSTOM",
+    "member", "CUSTOM",
+    "committee", "CUSTOM",
+    "commission", "CUSTOM",
+    "house", "CUSTOM",
+    "journalist", "CUSTOM"
+)
+
+
+
+#Randomly sample training records
+training_ids = sample(1:5000,5000)
+testing_ids = setdiff(1:5000,training_ids)
+#Creating  subsets.
+training = pm_speech_final[training_ids,]
+testing = movie_review[testing_ids,]
+
+parsed_speeches_2 <- spacyr::spacy_parse(training$document,  lemma = FALSE, entity = TRUE, nounphrase = TRUE, multithread = TRUE)
+
+prep_fun = function(x) {
+  # make text lower case
+  x = str_to_lower(x)
+  # lemmatization
+  x = textstem::lemmatize_words(x)
+  # remove non-alphanumeric symbols
+  x = str_replace_all(x, "[^[:alpha:]]", " ")
+  # collapse multiple spaces
+  x = str_replace_all(x, "\\s+", " ")
+}
+
+parsed_speeches %>% 
+  mutate(token = prep_fun(token)) -> clean_parsed
+
+saveRDS(parsed_speeches_2, "parsed_speeches.Rds")
+
+parsed_speeches <- readr::read_rds("parsed_speeches.rds")
+
+clean_parsed %>% 
+  filter(!(token %in% stopwords)) %>% 
+  filter(token != " ") -> parsed_nostop
+
+spacyr::entity_extract(parsed_nostop)[,c(3,4)] -> entities
+
+parsed_speeches %>% 
+  filter(!(token %in% stopwords)) -> parsed_nostop
+
+parsed_nostop %>% 
+  distinct(token, .keep_all = TRUE) %>% 
+  mutate(lemma = textstem::lemmatize_words(token)) %>% 
+  distinct(lemma, .keep_all = TRUE) -> spacy_filter
+
+spacy_filter[spacy_filter$entity %in% c("PERSON_I", "PERSON_B"),] -> spacy_filter
+
+spacy_filter$token
+
+parsed_speeches_11dec %>% 
+  filter(!(token %in% stopwords)) %>% 
+  distinct(token, .keep_all = TRUE) %>% 
+  mutate(lemma = textstem::lemmatize_words(token)) %>% 
+  distinct(lemma, .keep_all = TRUE)
+  
+
+# Load tidytext package for stopwords
+library(tidytext)
+
+parsed_nostop %>% 
+  distinct(token, .keep_all = TRUE) %>% 
+  mutate(lemma = textstem::lemmatize_words(token)) %>% 
+  distinct(lemma, .keep_all = TRUE) %>%
+  filter(pos == "ADJ",
+         str_detect(lemma, "^[:alpha:].*[:alpha:]$"),
+         !lemma %in% tidytext::stop_words$word) %>%
+  count(lemma) %>% 
+  mutate(lemma = fct_reorder(str_to_title(lemma), n)) %>%
+  top_n(15) %>% 
+  ggplot(aes(lemma, n)) +
+  geom_col() +
+  coord_flip() +
+  labs(title = "Top 15 Adjectives from President Obama's SOTU Addresses",
+       x = "Adjective", y = "Count") +
+  theme_classic()
+
+spacy_filter[spacy_filter$entity %in% c("PERSON_I", "PERSON_B"),] -> spacy_filter
+spacy_filter[spacy_filter$pos == "PROPN",]
+
+spacy_filter[spacy_filter$entity %in% c("PERSON_B"),] %>% distinct(token, .keep_all = TRUE)
+```
+```{r}
+prep_fun = function(x) {
+  # make text lower case
+  x = str_to_lower(x)
+  # lemmatization
+  x = textstem::lemmatize_words(x)
+  # remove non-alphanumeric symbols
+  x = str_replace_all(x, "[^[:alpha:]]", " ")
+  # collapse multiple spaces
+  x = str_replace_all(x, "\\s+", " ")
+}
+
+parsed_speeches %>% 
+  mutate(token = prep_fun(token)) -> clean_parsed
+
+clean_parsed %>% 
+  filter(!(token %in% stopwords)) %>% 
+  filter(token != " ") -> parsed_nostop
+
+spacyr::entity_extract(parsed_nostop)[,c(3,4)] -> entities
+
+entities %>% filter(hunspell_check(entity)) -> entities_sc
+
+entities_sc %>% distinct(entity, .keep_all = TRUE) %>% filter(entity_type == "LOC")
+
+entities %>% filter(entity_type == "NORP") %>% distinct(entity, .keep_all = TRUE)
+
+# names of people and internal locations
+# most frequent words lookup manual
+
+
+```
+
+```{r}
+spacyr::entity_consolidate(parsed_nostop)[,c(4,5,6)]
+```
+
+```{r}
+ldamodelcv[1]
+```
+
+```{r}
+lda_model$plot()
+```
+
+```{r}
+library(ldatuning)
+result <- FindTopicsNumber(
+  speech_dtm,
+  topics = seq(from = 80, to = 200, by = 25),
+  metrics = c("CaoJuan2009", "Arun2010", "Deveaud2014"),
+  method = "VEM",
+  control = list(seed = 831),
+  mc.cores = 8L,
+  verbose = TRUE)
+```
+
+```{r}
+#sample(nrow(pm_speech_final), )
+
+tidy_speech <- pm_speech_final %>%
+    #mutate(line = row_number()) %>%
+    #pr_normalize_punc(document)  %>%
+    unnest_tokens(word, document, strip_numeric = TRUE) %>%
+    anti_join(stopwords) %>%
+    mutate(word = textstem::lemmatize_words(word)) %>%
+    count(link, word, sort = TRUE)
+
+tidy_speech_sam <- tidy_speech[sample(nrow(tidy_speech), 3), ]
+
+spacy_filter <- spacy_filter %>% mutate("lexicon"="PERSONS") %>% rename("word"="token")
+
+dtm <- CreateDtm(doc_vec = pm_speech_final$document, # character vector of documents
+                 doc_names = pm_speech_final$id, # document names
+                 ngram_window = c(1, 2), # minimum and maximum n-gram length
+                 stopword_vec = c(stopwords::stopwords(source = "stopwords-iso"), # this is the default value
+                                  custom_stop_words,
+                                  spacy_filter[,c("word", "lexicon")]),
+                 lower = TRUE, # lowercase - this is the default value
+                 remove_punctuation = TRUE, # punctuation - this is the default
+                 remove_numbers = TRUE, # numbers - this is the default
+                 stem_lemma_function = function(x) textstem::lemmatize_words(x),
+                 verbose = FALSE,
+                 cpu = 4) # Turn off status bar for this demo)
+dtm <- dtm[,colSums(dtm) > 2]
+speech_dtm <- speech_dtm[,colSums(speech_dtm) > 2]
+
+assignments <- t(apply(doc_topic_distr, 1, function(x){
+  x[ x < 0.05 ] <- 0
+  x / sum(x)
+}))
+assignments[is.na(assignments)] <- 0
+
+
+
+
+
+lda_model_160 = LDA$new(n_topics = 160, doc_topic_prior = 0.1, topic_word_prior = 0.01)
+doc_topic_distr =
+lda_model_160$fit_transform(x = dtm, n_iter = 200,
+                        convergence_tol = 0.001, n_check_convergence = 25,
+                        progressbar = TRUE)
+
+lda_model_160$plot(out.dir = "ldavis_160", open.browser = FALSE)
+
+
+labels <- textmineR::LabelTopics(doc_topic_distr, dtm)
+
+topwords <- lda_model_160$get_top_words(n = 5, lambda = 1)
+
+lda_model_190 = LDA$new(n_topics = 190, doc_topic_prior = 0.1, topic_word_prior = 0.01)
+doc_topic_distr_190 =
+lda_model_190$fit_transform(x = dtm, n_iter = 200,
+                        convergence_tol = 0.001, n_check_convergence = 25,
+                        progressbar = TRUE)
+lda_model_190$plot(out.dir = "ldavis_190", open.browser = FALSE)
+
+
+
+as.data.frame(labels) -> labels
+
+
+labels <- textmineR::LabelTopics(doc_topic_distr, dtm)
+
+topwords <- lda_model$get_top_words(n = 5, lambda = 1)
+
+as.data.frame(topwords) %>%
+  pivot_longer(cols = everything(), names_to = "model", values_to = "topwords")-> topwords
+
+topwords %>% 
+    group_by(model) %>% 
+    mutate(topwords = paste0(topwords, collapse = ", ")) %>% 
+  distinct() -> topwords
+
+cbind(topwords, as.data.frame(labels)) -> labels_160
+
+labels_160 -> labels_190
+
+lda_model$topic_word_distribution = normalize(lda_model$components, 'l1')
+
+
+#explore the basic frequency
+tf <- TermDocFreq(dtm = dtm)
+original_tf <- tf %>% select(term, term_freq, doc_freq)
+rownames(original_tf) <- 1:nrow(original_tf)
+# Eliminate words appearing less than 2 times or in more than half of the documents
+vocabulary <- tf$term[ tf$term_freq > 1 & tf$doc_freq < nrow(dtm) / 2 ]
+
+
+# Creating Model ----------------------------------------------------------
+
+
+set.seed(12345)
+model_150 <- FitLdaModel(dtm = dtm,
+                     k = 150,
+                     iterations = 200,
+                     burnin = 180,
+                     alpha = 0.1,
+                     beta = 0.05,
+                     optimize_alpha = FALSE,
+                     calc_likelihood = TRUE,
+                     calc_coherence = TRUE,
+                     calc_r2 = TRUE)
+
+
+# Model evaluation --------------------------------------------------------
+
+
+# Get the top terms of each topic
+model$top_terms <- GetTopTerms(phi = model$phi, M = 20)
+# See top terms
+head(t(model$top_terms))
+# prevalence should be proportional to alpha
+model$prevalence <- colSums(model$theta) / sum(model$theta) * 100
+# textmineR has a naive topic labeling tool based on probable bigrams
+model$labels <- LabelTopics(assignments = model$theta > 0.05, 
+                            dtm = dtm,
+                            M = 1)
+# put them together, with coherence into a summary table
+model$summary <- data.frame(topic = rownames(model$phi),
+                            label = model$labels,
+                            coherence = round(model$coherence, 3),
+                            prevalence = round(model$prevalence,3),
+                            top_terms = apply(model$top_terms, 2, function(x){
+                              paste(x, collapse = ", ")
+                            }),
+                            stringsAsFactors = FALSE)
+model_test <- model$summary[ order(model$summary$prevalence, decreasing = TRUE) , ][ 1:20 , ]
+m1_score <- mean(model_test$coherence)
+
+# Plot dendogram
+model$topic_linguistic_dist <- CalcHellingerDist(model$phi)
+model$hclust <- hclust(as.dist(model$topic_linguistic_dist), "ward.D")
+model$hclust$labels <- paste(model$hclust$labels, model$labels[ , 1])
+plot(model$hclust)
+
+
+# word, topic relationship ------------------------------------------------
+
+
+#looking at the terms allocated to the topic and their pr(word|topic)
+allterms <-data.frame(t(model$phi))
+allterms$word <- rownames(allterms)
+rownames(allterms) <- 1:nrow(allterms)
+allterms <- data.table::melt(allterms,idvars = "word") 
+allterms <- allterms %>% rename(topic = variable)
+FINAL_allterms <- allterms %>% group_by(topic) %>% arrange(desc(value))
 ```
 

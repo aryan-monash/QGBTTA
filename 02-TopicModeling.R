@@ -12,37 +12,51 @@ library(proustr)
 
 
 all_pm_speech <- readRDS("data/all_pm_speech.Rds")
-current_pm_speech <- read_csv("data/2018-09-24-morrison.csv")
+current_pm_speech <- readRDS("data/2018-09-24-morrison.Rds")
 
 pm_speech_final <- bind_rows(all_pm_speech, current_pm_speech)
 
 # Short document removal
 pm_speech_final <- pm_speech_final[stringi::stri_length(pm_speech_final$document) > 50,]
 
+pm_speech_final <- readRDS("data/pm_speech_final.Rds")
+
+
 # Fix punctuations
 library(proustr)
 pm_speech_final <- pm_speech_final %>%
   pr_normalize_punc(document)
 
-saveRDS(pm_speech_final, "Data/pm_speech_final.Rds")
+#saveRDS(pm_speech_final, "Data/pm_speech_final.Rds")
 
 custom_stop_words <- tribble(
     ~word, ~lexicon,
     "prime", "CUSTOM",
-    "minister", "CUSTOM"
+    "minister", "CUSTOM",
+    "australia", "CUSTOM",
+    "australian", "CUSTOM",
+    "state", "CUSTOM",
+    "government", "CUSTOM",
+    "prime", "CUSTOM",
+    "pm", "CUSTOM",
+    "member", "CUSTOM",
+    "committee", "CUSTOM",
+    "commission", "CUSTOM",
+    "house", "CUSTOM",
+    "journalist", "CUSTOM"
 )
 
 dtm <- CreateDtm(doc_vec = pm_speech_final$document, # character vector of documents
-                 doc_names = pm_speech_final$link, # document names
+                 doc_names = pm_speech_final$id, # document names
                  ngram_window = c(1, 2), # minimum and maximum n-gram length
-                 stopword_vec = c(stopwords::stopwords("en"), # stopwords from tm
-                                  stopwords::stopwords(source = "smart"), # this is the default value
+                 stopword_vec = c(stopwords::stopwords(source = "stopwords-iso"), # this is the default value
                                   custom_stop_words),
                  lower = TRUE, # lowercase - this is the default value
                  remove_punctuation = TRUE, # punctuation - this is the default
                  remove_numbers = TRUE, # numbers - this is the default
                  stem_lemma_function = function(x) textstem::lemmatize_words(x),
-                 verbose = TRUE) # Turn off status bar for this demo)
+                 verbose = FALSE,
+                 cpu = 2) # Turn off status bar for this demo)
 dtm <- dtm[,colSums(dtm) > 2]
 
 #explore the basic frequency
@@ -57,23 +71,23 @@ vocabulary <- tf$term[ tf$term_freq > 1 & tf$doc_freq < nrow(dtm) / 2 ]
 
 
 set.seed(12345)
-model <- FitLdaModel(dtm = dtm,
-                     k = 10,
+model_150 <- FitLdaModel(dtm = dtm,
+                     k = 150,
                      iterations = 200,
                      burnin = 180,
                      alpha = 0.1,
                      beta = 0.05,
                      optimize_alpha = FALSE,
-                     calc_likelihood = FALSE,
-                     calc_coherence = FALSE,
-                     calc_r2 = FALSE)
+                     calc_likelihood = TRUE,
+                     calc_coherence = TRUE,
+                     calc_r2 = TRUE)
 
 
 # Model evaluation --------------------------------------------------------
 
 
 # Get the top terms of each topic
-model$top_terms <- GetTopTerms(phi = model$phi, M = 5)
+model$top_terms <- GetTopTerms(phi = model$phi, M = 20)
 # See top terms
 head(t(model$top_terms))
 # prevalence should be proportional to alpha
