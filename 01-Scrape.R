@@ -54,7 +54,7 @@ pm_meta["n_speech"] <- c(
 # Older PM Link = https://pmtranscripts.pmc.gov.au/?combine=&field_release_date_value[min]=&field_release_date_value[max]=&field_long_title_value=&body_value=&field_prime_minister_target_id=8&items_per_page=All
 
 # Starting RSelenium Client
-rD <- rsDriver(browser = "firefox")
+rD <- rsDriver(browser = "firefox") #select your browser, chrome or firefox pref
 # Initializing client object
 remDr <- rD[["client"]]
 
@@ -63,8 +63,8 @@ all_pm_df <- data.frame()
 
 # Main scraping loop - Loop through Prime ministers
 # Select 1:17 to loop through the first 17 prime ministers in pm_meta.
-for (pm_id in pm_meta$id[1:17]) {
-  
+for (id in pm_meta$id[1:18]) {
+  if (id <= 17) { # For PM' before current (Scott Morrison)
   # Initializing new home page link based on PM id
   pm_home_link <- paste0(
     "https://pmtranscripts.pmc.gov.au/?combine=&field_release_date_value[min]=&field_release_date_value[max]=&field_long_title_value=&body_value=&field_prime_minister_target_id=", # nolint
@@ -85,7 +85,38 @@ for (pm_id in pm_meta$id[1:17]) {
     html_attr("href")
   current_pm_df["ID"] <- pm_speech_links #  ID column houses links for corresponding speech title # nolint
   current_pm_df["Source"] <- as.character(NA) # Initialising column for HTML source of individual speeches # nolint
-
+  }
+  else{ # For Scott Morrison
+    current_pm_df <- data.frame()
+    for (page_id in 0:137) { # change 137 to last page
+      
+      # Initializing new home page link based on PM id
+      pm_home_link <- paste0("https://www.pm.gov.au/media?body_value=&field_media_type_value=transcript&page=",page_id # from link selector
+      )
+      # Navigating to PM homepage
+      remDr$navigate(pm_home_link)
+      # Assigning new character HTML object from link
+      pm_home_src <- remDr$getPageSource()[[1]]
+      
+      # Extracting meta for each PM using PM homescreen
+      # Extracted table [rx4] contains data,title,PM_name, original_doc columns
+      pm_speech_dates <- read_html(pm_home_src) %>% html_nodes(".date-display-single") %>% html_text() %>% as.Date("%d %b %Y")
+      pm_speech_titles <- read_html(pm_home_src) %>% html_nodes(".media-title a") %>% html_text()
+      pm_speech_links <- read_html(pm_home_src) %>%
+        html_nodes(".media-title a") %>%
+        html_attr("href")
+      current_pm_df <- current_pm_df[[1]]
+      temp_df <- data.frame(pm_speech_dates, pm_speech_titles) 
+      temp_df['Prime Minister'] <- "Morrison, Scott"
+      temp_df['Original Document'] <- NA
+      temp_df['ID'] <- pm_speech_links
+      temp_df <- temp_df %>% 
+        rename('Release Date' = 'pm_speech_dates',
+               'Title' = 'pm_speech_titles')
+      temp_df['Source'] <- as.character(NA)
+      current_pm_df <- bind_rows(current_pm_df, temp_df)
+      }
+  }
   # Sub loop - Loop through Documents
   # Loop through individual PM table to extract HTML source from every document
   for (i in seq_len(nrow(current_pm_df))) {
@@ -117,6 +148,7 @@ for (pm_id in pm_meta$id[1:17]) {
 }
 
 
+
 # Extracting Text from HTML Source ----------------------------------------
 
 # Function for extraction
@@ -125,6 +157,7 @@ extract_text <- function(df) {
   # Intializing column for extracted text for individual speeches of each PM
   df["Document"] <- as.character(NA) 
   # Looping through all speeches
+  stepi = 0
   for (src in df$Source) {
     stepi <- stepi + 1 # increment step for progressbar
     # error handler for broken encodings
@@ -142,12 +175,15 @@ extract_text <- function(df) {
           html_text()
       }
     )
-    print(stepi)
+    #print(stepi)
     df$Document[df$Source == src] <- paste(doc, collapse = " ")
     setTxtProgressBar(pb, stepi)
   }
   return(df)
 }
+
+
+# Calling the function ----------------------------------------------------
 
 # Calling the function
 all_pm_speech <- extract_text(all_pm_df)
