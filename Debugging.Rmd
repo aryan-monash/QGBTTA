@@ -33,6 +33,68 @@ pmt_session_ua <- read_html("https://pmtranscripts.pmc.gov.au/release/transcript
                          user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Safari/605.1.15") # nolint
 ```
 
+current pm
+
+```{r}
+for (id in 0:137) { # change 137 to last page
+  
+  # Initializing new home page link based on PM id
+  pm_home_link <- paste0("https://www.pm.gov.au/media?body_value=&field_media_type_value=transcript&page=",0 # from link selector
+  )
+  # Navigating to PM homepage
+  remDr$navigate(pm_home_link)
+  # Assigning new character HTML object from link
+  pm_home_src <- remDr$getPageSource()[[1]]
+
+  # Extracting meta for each PM using PM homescreen
+  # Extracted table [rx4] contains data,title,PM_name, original_doc columns
+  pm_speech_dates <- read_html(pm_home_src) %>% html_nodes(".date-display-single") %>% html_text() %>% as.Date("%d %b %Y")
+  pm_speech_titles <- read_html(pm_home_src) %>% html_nodes(".media-title a") %>% html_text()
+  pm_speech_links <- read_html(pm_home_src) %>%
+    html_nodes(".media-title a") %>%
+    html_attr("href")
+  current_pm_df <- current_pm_df[[1]]
+  temp_df <- data.frame(pm_speech_dates, pm_speech_titles) 
+  temp_df['Prime Minister'] <- "Morrison, Scott"
+  temp_df['Original Document'] <- NA
+  temp_df['ID'] <- pm_speech_links
+  temp_df <- temp_df %>% 
+    rename('Release Date' = 'pm_speech_dates',
+           'Title' = 'pm_speech_titles')
+  temp_df['Source'] <- as.character(NA)
+  
+  # Sub loop - Loop through Documents
+  # Loop through individual PM table to extract HTML source from every document
+  for (i in seq_len(nrow(current_pm_df))) {
+    # Initialize individual speech URL
+    speech_url <- paste0(
+      "https://pmtranscripts.pmc.gov.au", # from link selector
+      current_pm_df[i, 5] # ID column
+    )
+    # Start Scraping
+    Sys.sleep(runif(1, 4.0, 7.5)) # Crawl Delay as mentioned by the website
+    # Navigate to speech webpage
+    remDr$navigate(speech_url)
+    # Get source
+    pm_speech_src <- remDr$getPageSource()[[1]]
+    current_pm_df[i, 6] <- pm_speech_src # Populating 'Source' column
+  }
+  # Getting PM's meta for savefile name
+  current_pm_meta <- pm_meta %>%
+    filter(name %in% current_pm_df$`Prime Minister`) %>%
+    head(1)
+
+  # Saving individual PM's speeches in separate files
+  write.csv(current_pm_df, paste(current_pm_meta$term_start,
+    tolower(strsplit(current_pm_meta$name, ",")[[1]][1]),
+    sep = "-"
+  ))
+  # Adding New Prime minister's speeches to the main dataframe
+  all_pm_df <- bind_rows(all_pm_df, current_pm_df)
+}
+```
+
+
 ## Fixing inconsistensies in scraped files
 
 ### Fix Release date & Title column
@@ -500,7 +562,6 @@ tidy_speech_sc %>%
   mutate(word = textstem::lemmatize_words(word)) %>%
   anti_join(stop_words2) -> tidy_speech_lem
 
-
 stop_words2 <- get_stopwords(source = "stopwords-iso")  %>%
       bind_rows(custom_stop_words) 
 
@@ -626,18 +687,18 @@ c(colMeans(fm_12grams_measures2[[1]]),colMeans(fm_12grams_measures3[[1]]), colMe
 ```{r}
 
 coherance_sc <- data.frame(ntop)
-#coherance_sc[1] <- ntop 
+coherance_sc[1] <- ntop 
 coherance_sc[,2] <- colMeans(fm_12grams_measures2[[1]])
 for(i in 1:11) {
   tw = fm_12grams_measures2[[2]][[i]]$get_top_words(n = 10, lambda = 1)
   res = coherence(tw, tcm, n_doc_tcm = 23772)
   #colMeans(res)[[1]] -> c_v
-  coherance_sc[i,3] = colMeans(res)[[1]]
-  coherance_sc[i,4] = colMeans(res)[[2]]
-  coherance_sc[i,5] = colMeans(res)[[3]]
-  coherance_sc[i,6] = colMeans(res)[[4]]
-  coherance_sc[i,7] = colMeans(res)[[5]]
-  coherance_sc[i,8] = colMeans(res)[[6]]
+  coherance_sc[i,3] = colMeans(res)[[1]] #mean_logratio
+  coherance_sc[i,4] = colMeans(res)[[2]] #mean_pmi
+  coherance_sc[i,5] = colMeans(res)[[3]] #mean_npmi
+  coherance_sc[i,6] = colMeans(res)[[4]] #mean_difference
+  coherance_sc[i,7] = colMeans(res)[[5]] #mean_npmi_cosim
+  coherance_sc[i,8] = colMeans(res)[[6]] #mean_npmi_cosim2
 }
 tw = fm_12grams_measures2[[2]][[1]]$get_top_words(n = 10, lambda = 1)
 
@@ -651,25 +712,25 @@ tw = fm_12grams_measures2[[2]][[1]]$get_top_words(n = 10, lambda = 1)
 res = coherence(tw, tcm, n_doc_tcm = 23772)
 colMeans(res)[[6]]
 
-coherance_sc %>% 
+coherence_sc %>% 
   #mutate(V2 = ((V2 - min(V2)) / (max(V2) - min(V2)))) %>% 
   scale() %>% as.data.frame() -> csc 
 csc %>% 
   ggplot(aes(x = ntop)) +
   # geom_point(aes(y=V2), shape=18) +
   # geom_line(aes(y=V2)) +
-  geom_point(aes(y=V2, color = "mean_logratio")) +
-  geom_line(aes(y=V2, color = "mean_logratio")) +
-  geom_point(aes(y=V3, color = "mean_pmi")) +
-  geom_line(aes(y=V3, color = "mean_pmi")) +
-  geom_point(aes(y=V4, color = "mean_npmi")) +
-  geom_line(aes(y=V4, color = "mean_npmi")) +
-  geom_point(aes(y=V5, color = "mean_difference")) +
-  geom_line(aes(y=V5, color = "mean_difference")) +
-  geom_point(aes(y=V6, color = "mean_npmi_cosim")) +
-  geom_line(aes(y=V6, color = "mean_npmi_cosim")) +
-  geom_point(aes(y=V7, color = "mean_npmi_cosim2")) +
-  geom_line(aes(y=V7, color = "mean_npmi_cosim2")) +
+  geom_point(aes(y=V3, color = "mean_logratio")) +
+  geom_line(aes(y=V3, color = "mean_logratio")) +
+  geom_point(aes(y=V4, color = "mean_pmi")) +
+  geom_line(aes(y=V4, color = "mean_pmi")) +
+  geom_point(aes(y=V5, color = "mean_npmi")) +
+  geom_line(aes(y=V5, color = "mean_npmi")) +
+  geom_point(aes(y=V6, color = "mean_difference")) +
+  geom_line(aes(y=V6, color = "mean_difference")) +
+  geom_point(aes(y=V7, color = "mean_npmi_cosim")) +
+  geom_line(aes(y=V7, color = "mean_npmi_cosim")) +
+  geom_point(aes(y=V8, color = "mean_npmi_cosim2")) +
+  geom_line(aes(y=V8, color = "mean_npmi_cosim2")) +
   scale_x_continuous(breaks = seq(from = 100, to = 200, by = 10))+
   labs(y="Scaled Coherence", x = "Topic Number (k)")
 ```
