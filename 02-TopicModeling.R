@@ -82,6 +82,9 @@ spacy_filter <- spacy_filter %>% mutate("lexicon"="PERSONS") %>% rename("word"="
 
 # Creating Tidy dataset
 
+# Creating DFM - To be used for Warp LDA (`text2vec` library)
+# Warp LDA will then be used for cross validation in the next step
+# Warp LDA used for cv instead of gibbs-sampling as it is much faster
 stop_words2 <- get_stopwords(source = "stopwords-iso")  %>%
   bind_rows(custom_stop_words)
 
@@ -95,11 +98,10 @@ tidy_speech <- pm_speech_final %>%
   count(id, word, sort = TRUE) %>% 
   filter(nchar(word) > 2)
 
-# Creating DFM
 speech_dfm <- tidy_speech %>%
   cast_dfm(id, word, n)
 
-# Creating DTM
+# Creating DTM - To be used for filtered models due to higher accuracy 
 dtm <- CreateDtm(doc_vec = pm_speech_final$document, # character vector of documents
                  doc_names = pm_speech_final$id, # document names
                  ngram_window = c(1, 2), # minimum and maximum n-gram length
@@ -165,7 +167,7 @@ compute_models <- function(topics, numfolds, trainingdata){
 }
 
 # Running CV
-ntop <- seq(150, 200, by = 10) # (100, 125, 150, 175, 200)
+ntop <- seq(150, 200, by = 10) # (100, 125, 150, 175, 200) #select topics
 fm_12grams_measures <- compute_models(ntop, numfolds = 5, trainingdata = speech_dfm)
 
 # Perplexity
@@ -213,11 +215,11 @@ csc %>%
   labs(y="Scaled Coherence", x = "Topic Number (k)")
 
 
-# Filtered model -------------------------------------------------------------
+# Filtered list of models -------------------------------------------------------------
 
 ## Gibbs-sampler (Computationally Heavy)
 set.seed(12345)
-model_110 <- FitLdaModel(dtm = dtm_sam,
+model_110 <- FitLdaModel(dtm = dtm,
                      k = 110,
                      iterations = 300, #same as bybee
                      burnin = 180,
@@ -229,7 +231,7 @@ model_110 <- FitLdaModel(dtm = dtm_sam,
                      calc_r2 = TRUE,
                      cpu = 2)
 
-model_160 <- FitLdaModel(dtm = dtm_sam,
+model_160 <- FitLdaModel(dtm = dtm,
                          k = 160,
                          iterations = 300, #same as bybee
                          burnin = 180,
@@ -241,7 +243,7 @@ model_160 <- FitLdaModel(dtm = dtm_sam,
                          calc_r2 = TRUE,
                          cpu = 2)
 
-model_190 <- FitLdaModel(dtm = dtm_sam,
+model_190 <- FitLdaModel(dtm = dtm,
                          k = 190,
                          iterations = 300, #same as bybee
                          burnin = 180,
@@ -256,7 +258,7 @@ model_190 <- FitLdaModel(dtm = dtm_sam,
 
 # Final Model evaluation --------------------------------------------------------
 
-## Coherence score --------
+## Coherence score - TextmineR --------
 coh_score <- function(ldamod, dtm, n_topwords){
   # Get the top terms of each topic
   ldamod$top_terms <- GetTopTerms(phi = ldamod$phi, M = n_topwords)
@@ -311,7 +313,7 @@ doc_topic_distr =
 lda_model_190$plot(out.dir = "ldavis_190", open.browser = FALSE)
 
 
-# Plot dendogram ------------------
+# Plot dendogram ------------------ 
 model$topic_linguistic_dist <- CalcHellingerDist(model$phi)
 model$hclust <- hclust(as.dist(model$topic_linguistic_dist), "ward.D")
 model$hclust$labels <- paste(model$hclust$labels, model$labels[ , 1])
@@ -356,12 +358,16 @@ selected_topics <- c(1,2,3,4,5) #select interested topcis
 speech_topic_prob <- pm_speech_final %>% mutate(id = as.numeric(id))
 speech_topic_prob <- dplyr::left_join(speech_topic_prob,theta_df,by=c("id" = "document"))
 stp1 <- filter(speech_topic_prob, topic %in% selected_topics)
+
+# Summarising topic attention by median for every month
 test <- stp1 %>%
   mutate(month = yearmonth(date)) %>%
   group_by(month, topic) %>%
-  mutate(value = quantile(value, 0.5)) %>% 
+  mutate(value = quantile(value, 0.5)) %>% #taking median for summarising topic attnetion
   ungroup() %>% 
   arrange(month)
+
+# Filtering top 3 speeches in every topics in every month
 test2 <- stp1 %>%
   mutate(month = yearmonth(date)) %>%
   group_by(month, topic) %>%
@@ -369,9 +375,11 @@ test2 <- stp1 %>%
   filter(row_number() %in% c(1,2,3)) %>% 
   arrange(month) %>% 
   select(-value)
-test3 <- dplyr::left_join(test2,test)
-#test3 <- test3 %>% filter(value <= quantile(test3$value, .99)[[1]])
 
+# Shows top 3 speeches and corresponding topic attention for every month
+test3 <- dplyr::left_join(test2,test)
+
+# plot interactive topic attention 
 plotly::ggplotly(test3 %>% ggplot(aes(x = month, y = value, color = topic)) +
                    geom_line() +
                    facet_wrap(~topic))
